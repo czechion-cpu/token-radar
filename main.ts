@@ -13,7 +13,7 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
@@ -50,6 +50,66 @@ if (issue !== null) {
   process.exit(1);
 }
 
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const JPEG_MAGIC = [0xff, 0xd8, 0xff];
+
+/** Whether `bytes` open as a PNG or a JPEG: the dossier takes nothing else. */
+function imageType(bytes: Uint8Array): 'png' | 'jpeg' | null {
+  const opensWith = (magic: readonly number[]): boolean =>
+    bytes.length >= magic.length && magic.every((b, i) => bytes[i] === b);
+  if (opensWith(PNG_MAGIC)) return 'png';
+  if (opensWith(JPEG_MAGIC)) return 'jpeg';
+  return null;
+}
+
+/**
+ * The screenshots this run hands in, checked before anything is written: 3 or 4 of them,
+ * each a whole PNG or JPEG inside the dossier's byte cap, each with a name the dossier
+ * takes. A bad screenshots/ used to fail only at the dossier, after board.json, data.js
+ * and the dashboard were already written; now it fails here, with the file named.
+ */
+function validateScreenshots(dir: string): void {
+  if (!existsSync(dir)) {
+    process.stderr.write(`token radar: no screenshots/ directory: hand in 3 images, the board, a detail view and a filtered view\n`);
+    process.exit(1);
+  }
+  const names = readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && !e.name.startsWith('.'))
+    .map((e) => e.name)
+    .sort();
+  if (names.length < 3) {
+    process.stderr.write(`token radar: screenshots/ holds ${names.length} image${names.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
+    process.exit(1);
+  }
+  if (names.length > SCREENSHOT_CAPS.max) {
+    process.stderr.write(`token radar: screenshots/ holds ${names.length} images, over the ${SCREENSHOT_CAPS.max} the dossier takes\n`);
+    process.exit(1);
+  }
+  for (const name of names) {
+    if (!IMAGE_NAME.test(name)) {
+      process.stderr.write(`token radar: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
+      process.exit(1);
+    }
+    const bytes = readFileSync(join(dir, name));
+    if (imageType(bytes) === null) {
+      process.stderr.write(`token radar: screenshots/${name} is neither a PNG nor a JPEG\n`);
+      process.exit(1);
+    }
+    if (bytes.length > SCREENSHOT_CAPS.max_bytes) {
+      process.stderr.write(`token radar: screenshots/${name} is ${bytes.length} bytes, over the ${SCREENSHOT_CAPS.max_bytes} the dossier takes\n`);
+      process.exit(1);
+    }
+  }
+}
+
+validateScreenshots(join(here, 'screenshots'));
+
+// A run owns its output directory: drop what an earlier run left, so this run's /output
+// depends only on this run's inputs and never on a stale board, dashboard or screenshot.
+for (const owned of ['board.json', 'data.js', 'dashboard', 'screenshots', 'dossier.json']) {
+  rmSync(join(out, owned), { recursive: true, force: true });
+}
+
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
@@ -71,16 +131,6 @@ function copyFiles(from: string, to: string): string[] {
 
 const dashFiles = copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
-if (shots.length < 3) {
-  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
-  process.exit(1);
-}
-for (const name of shots) {
-  if (!IMAGE_NAME.test(name)) {
-    process.stderr.write(`token radar: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
-    process.exit(1);
-  }
-}
 
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(
